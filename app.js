@@ -146,10 +146,11 @@ function playMedia(notes){
     const frequency=440*2**((n.midi-69)/12);
     for(let i=0;i<Math.floor(n.length*rate);i++){
       const t=i/rate;
-      const envelope=Math.min(1,t/.012,(n.length-t)/.035);
+      const envelope=Math.min(1,t/.008,(n.length-t)/.05);
       const phase=2*Math.PI*frequency*t;
-      const wave=n.type==='triangle'?2/Math.PI*Math.asin(Math.sin(phase)):Math.sin(phase);
-      samples[offset+i]+=wave*envelope*n.volume;
+      const wave=(Math.sin(phase)+.32*Math.exp(-2.4*t)*Math.sin(2*phase)+.12*Math.exp(-4*t)*Math.sin(3*phase))/1.44;
+      const decay=.58+.42*Math.exp(-1.7*t);
+      samples[offset+i]+=wave*envelope*decay*n.volume;
     }
   }
   const wav=new ArrayBuffer(44+count*2);
