@@ -28,3 +28,21 @@ async function useRecordings(mode, action) {
 const getTake = id => useRecordings('readonly', store => store.get(id));
 const putTake = (id, blob) => useRecordings('readwrite', store => store.put(blob, id));
 const deleteTake = id => useRecordings('readwrite', store => store.delete(id));
+
+async function getAllRecordings() {
+  const db = await openRecordings();
+  return new Promise((resolve, reject) => {
+    const records = [];
+    const transaction = db.transaction('takes', 'readonly');
+    const request = transaction.objectStore('takes').openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      records.push({id: cursor.key, value: cursor.value});
+      cursor.continue();
+    };
+    transaction.oncomplete = () => resolve(records);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+

@@ -1,7 +1,7 @@
-const cacheName = 'tenor-studio-v8';
+const cacheName = 'tenor-studio-v9';
 const assets = [
-  './index.html', './app.js?v=8', './style.css?v=8', './repertoire.js?v=8',
-  './recordings.js?v=8', './manifest.webmanifest', './icon.svg', './icon.png',
+  './index.html', './app.js?v=9', './style.css?v=9', './repertoire.js?v=9',
+  './recordings.js?v=9', './manifest.webmanifest', './icon.svg', './icon.png',
 ];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(assets)).then(() => self.skipWaiting()));
@@ -23,3 +23,4 @@ self.addEventListener('fetch', event => {
   }
   event.respondWith(caches.match(request).then(hit => hit || fetch(request)));
 });
+

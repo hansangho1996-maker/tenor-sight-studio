@@ -3,7 +3,8 @@ const load=(key,fallback)=>{try{return JSON.parse(localStorage.getItem(key))??fa
 function save(key,value){try{localStorage.setItem(key,JSON.stringify(value));return true}catch{notify('기기 저장 공간을 사용할 수 없습니다.');return false}}
 let logs=load('tenor-logs',[]), states=load('tenor-states',{}), exams=load('tenor-exams',{}), meta=load('tenor-meta',{});
 const dateKey=()=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
-let takeRevision=0, piece, exam=false, revealed=false, started, ctx, master, metro, playing=[], answerTimer, recorder, opening=false, takeUrl, messageTimer;
+let takeRevision=0, piece, exam=false, revealed=false, started, practiceSeconds=0, timerRunning=false, ctx, master, metro, playing=[], answerTimer, recorder, opening=false, takeUrl, messageTimer;
+let examCueCount=0, examReadyAt=0;
 const notify=msg=>{$('notice').textContent=msg;clearTimeout(messageTimer);messageTimer=setTimeout(()=>$('notice').textContent='',3500)};
 const node=(tag,str)=>{const el=document.createElement(tag);el.textContent=str;return el};
 function review(p){const state=states[p.id];const graded=logs.find(l=>l.id===p.id&&l.accuracy!=null);return state==='복습 필요'||(state!=='완료'&&(graded?.accuracy??100)<80)}
@@ -12,39 +13,58 @@ document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>tab(b.dataset.t
 pieces.push(...load('tenor-generated',[]));
 const choose=values=>values[Math.floor(Math.random()*values.length)];
 function compose(level){
-  const [key,scale]=choose([
-    ['G장조',['G4','A4','B4','C5','D5','E5','F#5','G5']],
-    ['D장조',['D4','E4','F#4','G4','A4','B4','C#5','D5']],
-    ['A장조',['A4','B4','C#5','D5','E5','F#5','G#5','A5']],
-    ['G단조',['G4','A4','Bb4','C5','D5','Eb5','F5','G5']]
-  ]);
-  const beats=choose([3,4]);
+  const keys={
+    'C장조':['C','D','E','F','G','A','B'],
+    'G장조':['G','A','B','C','D','E','F#'],
+    'D장조':['D','E','F#','G','A','B','C#'],
+    'A장조':['A','B','C#','D','E','F#','G#'],
+    'F장조':['F','G','A','Bb','C','D','E'],
+    'G단조':['G','A','Bb','C','D','Eb','F'],
+    'A단조':['A','B','C','D','E','F','G']
+  };
+  const selected=$('keySetting').value;
+  const key=selected||choose(level==='초급'?['C장조','G장조','F장조','A단조']:Object.keys(keys));
+  const low=Number($('lowSetting').value), high=Number($('highSetting').value);
+  if(!Number.isInteger(low)||!Number.isInteger(high)||low<40||high>81||high-low<7)throw Error('음역은 최소 7반음 이상으로 설정해 주세요.');
+  const scale=[];
+  for(let octave=3;octave<=6;octave++)for(const name of keys[key]){
+    const note=name+octave, midi=parse(note).midi-12;
+    if(midi>=low&&midi<=high)scale.push(note);
+  }
+  const tonic=keys[key][0];
+  const tonicIndexes=scale.map((note,index)=>note.startsWith(tonic)?index:-1).filter(index=>index>=0);
+  if(scale.length<5||!tonicIndexes.length)throw Error('선택한 음역에 조성의 음이 부족합니다. 음역을 넓혀 주세요.');
+  const root=choose(tonicIndexes);
+  const beats=Number($('meterSetting').value[0])||choose([3,4]);
   const easy=level==='초급', advanced=level==='상급';
   const bars=[];
-  let degree=choose(easy?[0,1,2]:[0,2,4]);
+  let degree=root;
   for(let bar=0;bar<8;bar++){
-    if(bar===7){bars.push([[scale[0],beats]]);break}
+    if(bar===7){bars.push([[scale[root],beats]]);break}
     const sync=!easy&&(bar===1||bar===5);
     const rhythm=sync?[.5,.5,1,...Array(beats-2).fill(1)]
       :choose([[...Array(beats).fill(1)],[1,beats-1],[.5,.5,...Array(beats-1).fill(1)]]);
     const notes=rhythm.map((length,index)=>{
       const last=index===rhythm.length-1;
-      if(last&&(bar===3||bar===6))degree=bar===3?4:1;
+      if(last&&(bar===3||bar===6))degree=bar===3?Math.min(scale.length-1,root+2):Math.min(scale.length-1,root+1);
       else if(!(sync&&index===2)&&!(bar===0&&index===0)){
         const moves=easy?[-1,0,1]:advanced?[-3,-2,-1,1,2,3]:[-2,-1,0,1,2];
-        degree=choose(moves.map(move=>degree+move).filter(value=>value>=0&&value<=7));
+        degree=choose(moves.map(move=>degree+move).filter(value=>value>=0&&value<scale.length));
       }
       let name=scale[degree];
-      if(advanced&&bar===4&&index===0){
-        degree=3;
-        name=scale[degree].replace(/([A-G])#?(\d)/,'$1#$2');
+      if(advanced&&bar===4&&index===0&&name[1]!=='#'&&name[1]!=='b'&&parse(name).midi-12<high){
+        name=name.replace(/([A-G])(\d)/,'$1#$2');
       }
+      if(!easy&&bar===2&&index===0)name='r';
       return sync&&index===1?[name,length,true]:[name,length];
     });
     bars.push(notes);
   }
+  const requestedTempo=$('tempoSetting').value;
+  const tempo=requestedTempo?Number(requestedTempo):(easy?72:advanced?96:84);
+  if(!Number.isFinite(tempo)||tempo<35||tempo>180)throw Error('템포는 35~180 BPM으로 설정해 주세요.');
   return {id:'created-'+crypto.randomUUID(),title:'창작 시창',composer:'테너 시창실',work:level,
-    key,meter:beats+'/4',range:'C3–A4 연습 범위',bpm:easy?72:advanced?96:84,
+    key,meter:beats+'/4',range:'MIDI '+low+'–'+high,bpm:tempo,
     part:'테너',start:1,level,synthetic:true,bars};
 }
 function newProblem(dailyDate){
@@ -52,7 +72,8 @@ function newProblem(dailyDate){
   const level=$('level').value;
   const previous=dailyDate&&pieces.find(p=>p.dailyDate===dailyDate&&p.level===level);
   if(previous){select(previous);return}
-  const created=compose(level);
+  let created;
+  try{created=compose(level)}catch(error){notify(error.message);return}
   if(dailyDate)created.dailyDate=dailyDate;
   if(!save('tenor-generated',[...pieces.filter(p=>p.synthetic),created]))return;
   pieces.push(created);
@@ -60,11 +81,11 @@ function newProblem(dailyDate){
 }
 $('generate').onclick=()=>newProblem();
 
-function select(p){if(opening||recorder){notify('먼저 녹음을 끝내 주세요.');return}stopSound();piece=p;revealed=false;started=Date.now();$('timer').textContent='경과 0분 0초';$('log').reset();$('state').value=states[p.id]||'연습 중';$('bpm').value=p.bpm;$('bpm').oninput();$('score').hidden=false;$('sheet').textContent='악보 숨기기';$('badge').textContent=p.part+'  /  '+p.start+'–'+(p.start+7)+'마디  /  '+(meta[p.id]?.difficulty||p.level);$('title').textContent=p.title;$('details').textContent=[p.composer,p.work,p.key,p.meter,p.range].join(' · ');$('hint').textContent=p.synthetic?'창작 훈련 구절 · 실제 지정곡 미확정':(meta[p.id]?.exam||'실제 지정곡 미확정')+' · 원전 기준 발췌';renderScore();restoreTake(p);mode();tab('studio');}
+function select(p){if(opening||recorder){notify('먼저 녹음을 끝내 주세요.');return}if(piece)saveDraft();stopSound();piece=p;revealed=false;examCueCount=0;examReadyAt=exam?Date.now()+Math.max(0,Math.min(300,Number($('examPreparation').value)||0))*1000:0;practiceSeconds=0;timerRunning=false;started=Date.now();$('timerToggle').textContent='연습 시간 시작';$('timer').textContent='경과 0분 0초';$('log').reset();$('state').value=states[p.id]||'연습 중';$('bpm').value=p.bpm;$('bpm').oninput();$('score').hidden=false;$('sheet').textContent='악보 숨기기';$('badge').textContent=p.part+'  /  '+p.start+'–'+(p.start+7)+'마디  /  '+(meta[p.id]?.difficulty||p.level);$('title').textContent=p.title;$('details').textContent=[p.composer,p.work,p.key,p.meter,p.range].join(' · ');$('hint').textContent=p.synthetic?'창작 훈련 구절 · 실제 지정곡 미확정':(meta[p.id]?.exam||'실제 지정곡 미확정')+' · 원전 기준 발췌';renderScore();restoreTake(p);restoreDraft();mode();tab('studio');}
 function mode(){$('practice').classList.toggle('active',!exam);$('exam').classList.toggle('active',exam);$('answer').hidden=exam&&!revealed;$('reveal').hidden=!exam||revealed}
-$('practice').onclick=()=>{exam=false;mode()};
-$('exam').onclick=()=>{exam=true;revealed=false;stopSound();mode();notify('시작음과 악보로 먼저 부른 뒤 제출하세요.')};
-$('reveal').onclick=()=>{revealed=true;mode();notify('정답과 녹음을 비교해 보세요.')};
+$('practice').onclick=()=>{exam=false;$('examStatus').textContent='';mode()};
+$('exam').onclick=()=>{exam=true;revealed=false;examCueCount=0;examReadyAt=Date.now()+Math.max(0,Math.min(300,Number($('examPreparation').value)||0))*1000;stopSound();mode();notify('조성을 듣고 시창한 뒤 제출하세요.')};
+$('reveal').onclick=()=>{if(Date.now()<examReadyAt){notify('준비 시간이 끝난 뒤 제출할 수 있어요.');return}revealed=true;mode();notify('정답과 녹음을 비교해 보세요.')};
 $('daily').onclick=()=>newProblem(dateKey());
 $('next').onclick=()=>select(randomOriginal());
 let recentOriginals=[];
@@ -81,7 +102,7 @@ $('bpm').oninput=()=>{$('bpmVal').value=$('bpm').value+' BPM';if(metro){stopMetr
 const steps='CDEFGAB', chroma=[0,2,4,5,7,9,11];
 function parse(s){if(s==='r')return null;const [,letter,acc,oct]=s.match(/^([A-G])([#bn]?)(\d)$/);const i=steps.indexOf(letter);return {step:Number(oct)*7+i,acc,midi:(Number(oct)+1)*12+chroma[i]+(acc==='#'?1:acc==='b'?-1:0)}}
 function renderScore(){const bars=piece.bars;let markup='';
-const keySig={'A장조':['F#5','C#5','G#5'],'D장조':['F#5','C#5'],'G장조':['F#5'],'G단조':['Bb4','Eb5']}[piece.key]||[];
+const keySig={'A장조':['F#5','C#5','G#5'],'D장조':['F#5','C#5'],'G장조':['F#5'],'G단조':['Bb4','Eb5'],'F장조':['Bb4']}[piece.key]||[];
 const defaults=Object.fromEntries(keySig.map(n=>[n[0],n[1]]));
 for(let row=0;row<bars.length;){const count=bars[row].length>5||bars[row+1]?.length>5?1:Math.min(2,bars.length-row);let svg='<svg viewBox="0 0 350 105" role="img" aria-label="'+(row+1)+'번째 마디부터 악보">';
 for(let l=0;l<5;l++){let y=36+l*8;svg+=`<path d="M8 ${y}H342" stroke="#777" stroke-width=".8"/>`}
@@ -92,7 +113,7 @@ for(let k=0;k<count;k++){const leftStart=51+keySig.length*10;
 const width=(342-leftStart)/count;
 const notes=bars[row+k],left=leftStart+k*width,right=left+width;
 const accidentals={};svg+=`<path d="M${right} 36v32" stroke="#333"/><text x="${left+3}" y="20" font-size="9" fill="#805137">${piece.start+row+k}</text>`;
-for(let n=0;n<notes.length;n++){const [name,d,tie]=notes[n];const x=left+14+n*(right-left-20)/notes.length;const p=parse(name);if(!p){if(d>=2&&d<=4)svg+=`<rect x="${x-5}" y="${d===2?48:52}" width="10" height="4"/>${d===3?`<circle cx="${x+8}" cy="50" r="1.4"/>`:''}`;else if(d>=1)svg+=`<path d="M${x-2} 43l5 6-5 7q8 0 4 7" fill="none" stroke="currentColor" stroke-width="2"/>`;else svg+=`<circle cx="${x-3}" cy="49" r="2.4"/><path d="M${x-3} 49q6 5 9-3l-6 16" fill="none" stroke="currentColor" stroke-width="1.3"/>`;continue}
+for(let n=0;n<notes.length;n++){const [name,d,tie]=notes[n];const x=left+14+n*(right-left-20)/notes.length;const p=parse(name);if(!p){if(d>=2&&d<=4)svg+=`<rect x="${x-5}" y="${d===2||d===3?48:52}" width="10" height="4"/>`;else if(d>=1)svg+=`<path d="M${x-2} 43l5 6-5 7q8 0 4 7" fill="none" stroke="currentColor" stroke-width="2"/>`;else {svg+=`<circle cx="${x-3}" cy="49" r="2.4"/><path d="M${x-3} 49q6 5 9-3l-6 16" fill="none" stroke="currentColor" stroke-width="1.3"/>`;if(d<=.375)svg+=`<circle cx="${x-4}" cy="55" r="2.4"/><path d="M${x-4} 55q6 5 9-3" fill="none" stroke="currentColor" stroke-width="1.3"/>`;}if([.375,.75,1.5,3].includes(d))svg+=`<circle cx="${x+9}" cy="50" r="1.4"/>`;continue}
 const y=68-(p.step-30)*4;
 for(let j=y<36?28:76;y<36?j>=y:j<=y;j+=y<36?-8:8)svg+=`<path d="M${x-8} ${j}h16" stroke="currentColor"/>`;
 const prior=accidentals[p.step]??defaults[name[0]]??'';
@@ -194,8 +215,8 @@ $('keyCue').onclick=()=>{
         time+=.53;
       }
     }
-    if($('cue').value==='scale'){
-      const scale=[0,2,minor?3:4,5,7,minor?8:9,minor?10:11,12];
+    if($('cue').value==='scale'||$('cue').value==='harmonic'){
+      const scale=[0,2,minor?3:4,5,7,minor?8:9,minor&&$('cue').value!=='harmonic'?10:11,12];
       for(const interval of [...scale,...scale.slice(0,-1).reverse()]){
         tone(tonic+interval,time,.19,.28);
         time+=.22;
@@ -210,6 +231,11 @@ $('answer').onclick=()=>{if(opening||recorder){notify('녹음이 끝나면 정�
 for(const id of ['pitch','keyCue','answer']){
   const action=$(id).onclick;
   $(id).onclick=()=>{
+    if(exam&&!revealed&&(id==='pitch'||id==='keyCue')){
+      const limit=Math.max(1,Math.min(10,Number($('examCueLimit').value)||1));
+      if(examCueCount>=limit){notify('이번 실전의 조성 안내 횟수를 모두 사용했습니다.');return}
+      examCueCount++;
+    }
     mediaNotes=[];
     try{
       action();
@@ -222,6 +248,7 @@ function clearTake() {
   $('take').removeAttribute('src');
   $('take').hidden = true;
   $('deleteTake').hidden = true;
+  $('compareTake').hidden = true;
   if (takeUrl) URL.revokeObjectURL(takeUrl);
   takeUrl = null;
 }
@@ -232,8 +259,9 @@ function showTake(blob, saved) {
   $('take').src = takeUrl;
   $('take').hidden = false;
   $('deleteTake').hidden = !saved;
+  $('compareTake').hidden = false;
   $('recInfo').textContent = saved
-    ? '이 구절의 최근 녹음이 기기에 저장됐어요. 새 녹음을 하면 교체됩니다.'
+    ? '이 구절의 녹음이 기기에 저장됐어요.'
     : '녹음을 들을 수 있어요. 기기에 저장하지 못했습니다.';
 }
 
@@ -242,9 +270,14 @@ async function restoreTake(p) {
   clearTake();
   $('recInfo').textContent = '이 구절의 최근 녹음을 확인하는 중…';
   try {
-    const blob = await getTake(p.id);
+    const value = await getTake(p.id);
     if (revision !== takeRevision) return;
-    if (blob) showTake(blob, true);
+    const takes=value instanceof Blob?[{blob:value,date:null}]:Array.isArray(value)?value:[];
+    $('takeList').replaceChildren();
+    takes.forEach((take,index)=>{const option=node('option',take.date?new Date(take.date).toLocaleString('ko-KR'):'이전 녹음');option.value=String(index);$('takeList').append(option)});
+    $('takeList').hidden=takes.length===0;
+    $('takeList').onchange=()=>showTake(takes[Number($('takeList').value)].blob,true);
+    if (takes.length) showTake(takes[0].blob, true);
     else $('recInfo').textContent = '마이크 권한을 허용하면 녹음하고 바로 들을 수 있어요.';
   } catch {
     if (revision === takeRevision) $('recInfo').textContent = '기기에서 이전 녹음을 읽을 수 없습니다. 새 녹음은 바로 들을 수 있어요.';
@@ -257,10 +290,13 @@ $('deleteTake').onclick = async () => {
   const revision = ++takeRevision;
   $('deleteTake').disabled = true;
   try {
-    await deleteTake(p.id);
+    const old=await getTake(p.id);
+    const takes=old instanceof Blob?[{blob:old,date:null}]:Array.isArray(old)?old:[];
+    takes.splice(Number($('takeList').value)||0,1);
+    if(takes.length)await putTake(p.id,takes);else await deleteTake(p.id);
     if (revision === takeRevision) {
-      clearTake();
-      $('recInfo').textContent = '녹음을 지웠습니다.';
+      await restoreTake(p);
+      notify('선택한 녹음을 지웠습니다.');
     }
   } catch {
     notify('녹음을 지우지 못했습니다.');
@@ -279,7 +315,9 @@ function microphoneMessage(error) {
 }
 
 $('record').onclick = async () => {
+  if(exam&&!revealed&&!$('examRecording').checked){notify('실전 설정에서 녹음 사용을 켜 주세요.');return}
   if (recorder?.state === 'recording') {
+    stopMetro();
     recorder.stop();
     $('record').disabled = true;
     return;
@@ -313,8 +351,10 @@ $('record').onclick = async () => {
         if (chunks.length && !failed) {
           const blob = new Blob(chunks, {type: type || chunks[0].type});
           try {
-            await putTake(p.id, blob);
-            if (revision === takeRevision) showTake(blob, true);
+            const old=await getTake(p.id);
+            const takes=old instanceof Blob?[{blob:old,date:null}]:Array.isArray(old)?old:[];
+            await putTake(p.id,[{blob,date:new Date().toISOString()},...takes]);
+            if (revision === takeRevision) await restoreTake(p);
           } catch {
             if (revision === takeRevision) showTake(blob, false);
           }
@@ -328,7 +368,16 @@ $('record').onclick = async () => {
         $('record').textContent = '● 녹음 시작';
       }
     };
+    if($('countIn').checked){
+      audio();
+      const beats=Number(piece.meter[0]), beatLength=60000/Number($('bpm').value);
+      for(let i=0;i<beats;i++){
+        tone(i===0?89:81,ctx.currentTime+.02,.075,.25,'sine',false);
+        await new Promise(resolve=>setTimeout(resolve,beatLength));
+      }
+    }
     recorder.start();
+    if($('recordMetro').checked)startMetro();
     $('record').textContent = '■ 녹음 종료';
     $('recInfo').textContent = '녹음 중…';
   } catch (error) {
@@ -341,24 +390,120 @@ $('record').onclick = async () => {
   }
 };
 
-function elapsed(){return Math.floor((Date.now()-started)/1000)}
+$('compareTake').onclick=()=>{
+  if(exam&&!revealed){notify('실전 모드를 제출한 뒤 정답을 비교할 수 있어요.');return}
+  $('take').onended=()=>{$('take').onended=null;$('answer').click()};
+  $('take').play().catch(()=>notify('녹음을 재생하지 못했습니다. 다시 눌러 주세요.'));
+};
+$('cue').append(node('option','화성단음계 + 시작음'));
+$('cue').lastChild.value='harmonic';
+
+const savedKeys=['tenor-logs','tenor-states','tenor-exams','tenor-meta','tenor-generated','tenor-drafts'];
+function downloadBackup(data,name){
+  const url=URL.createObjectURL(new Blob([JSON.stringify(data)],{type:'application/json'}));
+  const link=document.createElement('a');link.href=url;link.download=name;link.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+$('exportData').onclick=()=>{
+  const data={};
+  for(const key of savedKeys)data[key]=load(key,key==='tenor-logs'||key==='tenor-generated'?[]:{});
+  downloadBackup({format:'tenor-studio-records',version:1,data},'tenor-records.json');
+};
+function blobAsData(blob){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(reader.error);reader.readAsDataURL(blob)})}
+$('exportAudio').onclick=async()=>{
+  try{
+    const records=await getAllRecordings(), output=[];
+    for(const record of records){
+      const takes=record.value instanceof Blob?[{blob:record.value,date:null}]:record.value;
+      if(!Array.isArray(takes))continue;
+      const converted=[];
+      for(const take of takes)converted.push({date:take.date,data:await blobAsData(take.blob)});
+      output.push({id:record.id,takes:converted});
+    }
+    downloadBackup({format:'tenor-studio-audio',version:1,recordings:output},'tenor-recordings.json');
+  }catch{notify('녹음 백업에 실패했습니다. 저장 공간과 권한을 확인해 주세요.')}
+};
+$('importData').onchange=async event=>{
+  const file=event.target.files[0];
+  if(!file)return;
+  try{
+    const backup=JSON.parse(await file.text());
+    if(!confirm('기존 데이터와 백업 데이터를 합칩니다. 같은 항목은 기존 내용을 유지합니다. 계속할까요?'))return;
+    if(backup.format==='tenor-studio-records'){
+      if(!backup.data||typeof backup.data!=='object')throw Error('기록 형식이 올바르지 않습니다.');
+      const current=Object.fromEntries(savedKeys.map(key=>[key,load(key,key==='tenor-logs'||key==='tenor-generated'?[]:{})]));
+      const incoming=backup.data;
+      for(const key of ['tenor-logs','tenor-generated'])if(incoming[key]!==undefined&&!Array.isArray(incoming[key]))throw Error('기록 형식이 올바르지 않습니다.');
+      for(const key of ['tenor-states','tenor-exams','tenor-meta','tenor-drafts'])if(incoming[key]!==undefined&&(!incoming[key]||typeof incoming[key]!=='object'||Array.isArray(incoming[key])))throw Error('설정 형식이 올바르지 않습니다.');
+      const generated=[...current['tenor-generated']];
+      for(const p of incoming['tenor-generated']||[])if(p.id&&!generated.some(existing=>existing.id===p.id))generated.push(p);
+      const logsMerged=[...current['tenor-logs']];
+      const known=new Set(logsMerged.map(item=>JSON.stringify(item)));
+      for(const item of incoming['tenor-logs']||[]){const signature=JSON.stringify(item);if(!known.has(signature)){known.add(signature);logsMerged.push(item)}}
+      const merged={'tenor-logs':logsMerged,'tenor-generated':generated};
+      for(const key of ['tenor-states','tenor-exams','tenor-meta','tenor-drafts'])merged[key]={...incoming[key],...current[key]};
+      try{for(const key of savedKeys)localStorage.setItem(key,JSON.stringify(merged[key]))}
+      catch(error){for(const key of savedKeys)localStorage.setItem(key,JSON.stringify(current[key]));throw error}
+      $('backupStatus').textContent='기록을 합쳤습니다. 화면을 다시 엽니다.';
+      location.reload();
+    }else if(backup.format==='tenor-studio-audio'){
+      if(!Array.isArray(backup.recordings))throw Error('녹음 형식이 올바르지 않습니다.');
+      for(const record of backup.recordings){
+        if(typeof record.id!=='string'||!Array.isArray(record.takes))throw Error('녹음 형식이 올바르지 않습니다.');
+        const old=await getTake(record.id);
+        const takes=old instanceof Blob?[{blob:old,date:null}]:Array.isArray(old)?old:[];
+        for(const take of record.takes){
+          if(typeof take.data!=='string'||!take.data.startsWith('data:audio/'))throw Error('녹음 데이터가 올바르지 않습니다.');
+          if(!takes.some(existing=>existing.date&&existing.date===take.date))takes.push({date:take.date,blob:await(await fetch(take.data)).blob()});
+        }
+        await putTake(record.id,takes);
+      }
+      $('backupStatus').textContent='녹음을 합쳤습니다.';
+      await restoreTake(piece);
+    }else throw Error('지원하지 않는 백업 파일입니다.');
+  }catch(error){$('backupStatus').textContent='가져오기 실패 · '+error.message}
+  finally{event.target.value=''}
+};
+
+function elapsed(){return Math.floor(practiceSeconds+(timerRunning?(Date.now()-started)/1000:0))}
+$('timerToggle').onclick=()=>{
+  if(timerRunning){practiceSeconds=elapsed();timerRunning=false;$('timerToggle').textContent='연습 시간 계속'}
+  else{started=Date.now();timerRunning=true;$('timerToggle').textContent='일시정지'}
+};
+$('timerEnd').onclick=()=>{if(timerRunning)practiceSeconds=elapsed();timerRunning=false;$('timerToggle').textContent='연습 시간 계속'};
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&timerRunning)$('timerEnd').click()});
+function saveDraft(){
+  const drafts=load('tenor-drafts',{});
+  drafts[piece.id]={memo:$('memo').value,accuracy:$('accuracy').value,repeats:$('repeats').value,state:$('state').value,reasons:[...document.querySelectorAll('[name=reason]:checked')].map(el=>el.value)};
+  save('tenor-drafts',drafts);
+}
+function restoreDraft(){
+  const draft=load('tenor-drafts',{})[piece.id];
+  if(!draft)return;
+  for(const id of ['memo','accuracy','repeats','state'])if(draft[id]!=null)$(id).value=draft[id];
+  document.querySelectorAll('[name=reason]').forEach(el=>el.checked=(draft.reasons||[]).includes(el.value));
+}
+$('log').addEventListener('input',()=>{if(piece)saveDraft()});
 function duration(sec){return Math.floor(sec/60)+'분 '+sec%60+'초'}
 setInterval(()=>$('timer').textContent='경과 '+duration(elapsed()),1000);
-$('log').onsubmit=e=>{e.preventDefault();const entry={id:piece.id,date:dateKey(),accuracy:$('accuracy').value===''?null:Number($('accuracy').value),seconds:elapsed(),repeats:Number($('repeats').value),memo:$('memo').value,state:$('state').value,mode:exam?'실전':'연습'};const nextLogs=[entry,...logs];if(save('tenor-logs',nextLogs)){logs=nextLogs;states={...states,[piece.id]:entry.state};save('tenor-states',states);started=Date.now();$('memo').value='';$('accuracy').value='';$('repeats').value='1';notify('연습을 저장했습니다.')}};
+setInterval(()=>{if(exam&&!revealed)$('examStatus').textContent=Date.now()<examReadyAt?'준비 시간 '+Math.ceil((examReadyAt-Date.now())/1000)+'초':'시창 후 제출하세요.'},1000);
+$('log').onsubmit=e=>{e.preventDefault();const entry={id:piece.id,date:dateKey(),accuracy:$('accuracy').value===''?null:Number($('accuracy').value),seconds:elapsed(),repeats:Number($('repeats').value),memo:$('memo').value,reasons:[...document.querySelectorAll('[name=reason]:checked')].map(el=>el.value),state:$('state').value,mode:exam?'실전':'연습'};const nextLogs=[entry,...logs];if(save('tenor-logs',nextLogs)){logs=nextLogs;states={...states,[piece.id]:entry.state};save('tenor-states',states);practiceSeconds=0;timerRunning=false;started=Date.now();$('timerToggle').textContent='연습 시간 시작';$('memo').value='';$('accuracy').value='';$('repeats').value='1';document.querySelectorAll('[name=reason]').forEach(el=>el.checked=false);saveDraft();notify('연습을 저장했습니다.')}};
 function opener(p,label){const b=node('button',label);b.onclick=()=>{select(p);window.scrollTo(0,0)};return b}
 function pieceLabel(p){return p&&p.title+' · '+p.part+' · '+p.start+'–'+(p.start+7)+'마디'}
-function historyView(){const queue=pieces.filter(review);$('reviews').replaceChildren(...(queue.length?queue.map(p=>opener(p,pieceLabel(p))): [node('p','복습할 구절이 없습니다.')]));$('logs').replaceChildren(...(logs.length?logs.map(l=>{const div=node('div','');div.className='row';div.append(node('strong',pieceLabel(pieces.find(p=>p.id===l.id))||l.id),node('p',[l.date,l.mode,l.accuracy==null?'미평가':l.accuracy+'%',duration(l.seconds),l.repeats+'회',l.state].join(' · ')));if(l.memo)div.append(node('p',l.memo));const savedPiece=pieces.find(p=>p.id===l.id);if(savedPiece)div.append(opener(savedPiece,'다시 풀기'));return div}):[node('p','저장한 연습이 없습니다.')]))}
+function historyView(){const queue=pieces.filter(review);$('reviews').replaceChildren(...(queue.length?queue.map(p=>opener(p,pieceLabel(p))): [node('p','복습할 구절이 없습니다.')]));$('logs').replaceChildren(...(logs.length?logs.map(l=>{const div=node('div','');div.className='row';div.append(node('strong',pieceLabel(pieces.find(p=>p.id===l.id))||l.id),node('p',[l.date,l.mode,l.accuracy==null?'미평가':l.accuracy+'%',duration(l.seconds),l.repeats+'회',l.state].join(' · ')));if(l.reasons?.length)div.append(node('p','복습 항목 · '+l.reasons.join(', ')));if(l.memo)div.append(node('p',l.memo));const savedPiece=pieces.find(p=>p.id===l.id);if(savedPiece)div.append(opener(savedPiece,'다시 풀기'));return div}):[node('p','저장한 연습이 없습니다.')]))}
 function field(label,values,current,change){const wrap=node('label',label), el=document.createElement(values?'select':'input');if(values)for(const v of values)el.append(node('option',v));el.value=current;el.onchange=()=>change(el.value);wrap.append(el);return wrap}
 function libraryView(){
 $('exams').replaceChildren(...['서산시립합창단','보령시립합창단'].map(name=>{const div=node('div','');div.className='row';div.append(node('strong',name));const fields=node('div','');fields.className='fields';for(const [key,label] of [['date','시험 일정'],['song','지정곡']])fields.append(field(label,null,exams[name]?.[key]||'미확정',v=>{const updated={...exams,[name]:{...exams[name],[key]:v||'미확정'}};if(save('tenor-exams',updated))exams=updated}));div.append(fields);return div}));
-$('pieces').replaceChildren(...pieces.filter(p=>!p.synthetic).map(p=>{const div=node('div','');div.className='row';div.append(node('strong',p.title),node('p',[p.composer,p.work,p.part,p.start+'–'+(p.start+7)+'마디',p.range,p.key,p.bpm+' BPM'].join(' · ')));const fields=node('div','');fields.className='fields';const edit=(key,v)=>{const updated={...meta,[p.id]:{...meta[p.id],[key]:v}};if(save('tenor-meta',updated))meta=updated};fields.append(field('난이도',['초급','중급','상급'],meta[p.id]?.difficulty||p.level,v=>edit('difficulty',v)),field('시험용 여부',['미확정','시험 대비용','확인한 지정곡','시험 외 연습'],meta[p.id]?.exam||'미확정',v=>edit('exam',v)),field('연습 상태',['미시작','연습 중','복습 필요','완료'],states[p.id]||'미시작',v=>{const updated={...states,[p.id]:v};if(save('tenor-states',updated)){states=updated;if(piece.id===p.id)$('state').value=v}}));div.append(fields,opener(p,'이 구절 연습'));if(p.source){const link=node('a',' 원전 악보 ↗');link.href=p.source;link.target='_blank';link.rel='noopener';div.append(link);if(p.credit){const credit=node('p',p.credit+' ');const license=node('a','라이선스');license.href=p.credit.includes('4.0')?'https://creativecommons.org/licenses/by/4.0/':'https://creativecommons.org/licenses/by/3.0/';credit.append(license);div.append(credit)}}return div}));
+$('pieces').replaceChildren(...pieces.filter(p=>!p.synthetic&&[p.title,p.composer,p.work,meta[p.id]?.difficulty||p.level,states[p.id]||'미시작'].join(' ').toLowerCase().includes($('librarySearch').value.trim().toLowerCase())).map(p=>{const div=node('div','');div.className='row';div.append(node('strong',p.title),node('p',[p.composer,p.work,p.part,p.start+'–'+(p.start+7)+'마디',p.range,p.key,p.bpm+' BPM'].join(' · ')));const fields=node('div','');fields.className='fields';const edit=(key,v)=>{const updated={...meta,[p.id]:{...meta[p.id],[key]:v}};if(save('tenor-meta',updated))meta=updated};fields.append(field('난이도',['초급','중급','상급'],meta[p.id]?.difficulty||p.level,v=>edit('difficulty',v)),field('시험용 여부',['미확정','시험 대비용','확인한 지정곡','시험 외 연습'],meta[p.id]?.exam||'미확정',v=>edit('exam',v)),field('연습 상태',['미시작','연습 중','복습 필요','완료'],states[p.id]||'미시작',v=>{const updated={...states,[p.id]:v};if(save('tenor-states',updated)){states=updated;if(piece.id===p.id)$('state').value=v}}));div.append(fields,opener(p,'이 구절 연습'));if(p.source){const link=node('a',' 원전 악보 ↗');link.href=p.source;link.target='_blank';link.rel='noopener';div.append(link);if(p.credit){const credit=node('p',p.credit+' ');const license=node('a','라이선스');license.href=p.credit.includes('4.0')?'https://creativecommons.org/licenses/by/4.0/':'https://creativecommons.org/licenses/by/3.0/';credit.append(license);div.append(credit)}}return div}));
 }
+$('librarySearch').oninput=libraryView;
 newProblem(dateKey());
 if('serviceWorker' in navigator){
   navigator.serviceWorker.addEventListener('controllerchange',()=>{
-    if(sessionStorage.getItem('tenor-sw-v7'))return;
-    sessionStorage.setItem('tenor-sw-v7','1');
+    if(sessionStorage.getItem('tenor-sw-v9'))return;
+    sessionStorage.setItem('tenor-sw-v9','1');
     location.reload();
   });
-  navigator.serviceWorker.register('./sw.js').then(registration=>registration.update()).then(()=>navigator.serviceWorker.ready).then(()=>$('offline').textContent='오프라인 사용 가능').catch(()=>$('offline').textContent='오프라인 준비 실패')
+  navigator.serviceWorker.register('./sw.js').then(registration=>{if(navigator.onLine)registration.update().catch(()=>{});return navigator.serviceWorker.ready}).then(()=>$('offline').textContent='오프라인 사용 가능').catch(()=>$('offline').textContent='오프라인 준비 실패')
 }else $('offline').textContent='오프라인 미지원';
+
